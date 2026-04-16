@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 permissions:
   contents: read
@@ -24,16 +26,143 @@ jobs:
 
       - name: OWASP ZAP Authenticated DAST Scan
         uses: zaproxy/action-af@v0.2.0
-        continue-on-error: true          # ← replaces fail_action (not supported in action-af)
+        continue-on-error: true
         with:
           plan: '.github/workflows/zap/plan.yml'
-          # token and fail_action are NOT valid inputs for action-af — removed
 
       - name: List generated reports
         if: always()
         run: |
           echo "====== ZAP folder contents ======"
           ls -la .github/workflows/zap/
+
+      # ── KEY STEP: Parse JSON report and write summary to GitHub Actions UI ─
+      - name: Publish DAST Summary to GitHub Actions
+        if: always()
+        run: |
+          python3 << 'EOF'
+          import json, os, sys
+
+          report_path = ".github/workflows/zap/report_json.json"
+          summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          # ── Load report ───────────────────────────────────────────────────
+          try:
+              with open(report_path) as f:
+                  report = json.load(f)
+          except Exception as e:
+              print(f"Could not read report: {e}")
+              sys.exit(0)
+
+          # ── Count alerts by risk level ────────────────────────────────────
+          counts = {"High": 0, "Medium": 0, "Low": 0, "Informational": 0}
+          alert_rows = []
+
+          for site in report.get("site", []):
+              for alert in site.get("alerts", []):
+                  risk     = alert.get("riskdesc", "").split(" ")[0]   # "High (High)" → "High"
+                  name     = alert.get("name", "Unknown")
+                  count    = alert.get("count", "?")
+                  solution = alert.get("solution", "")[:120].strip()   # first 120 chars
+
+                  if risk in counts:
+                      counts[risk] += 1
+
+                  # emoji badge per risk
+                  badge = {
+                      "High":          "🔴 High",
+                      "Medium":        "🟠 Medium",
+                      "Low":           "🟡 Low",
+                      "Informational": "🔵 Info"
+                  }.get(risk, risk)
+
+                  alert_rows.append((risk, badge, name, str(count), solution))
+
+          # ── Sort: High → Medium → Low → Info ─────────────────────────────
+          order = {"High": 0, "Medium": 1, "Low": 2, "Informational": 3}
+          alert_rows.sort(key=lambda x: order.get(x[0], 9))
+
+          # ── Decide overall status ─────────────────────────────────────────
+          if counts["High"] > 0:
+              status_icon  = "🔴"
+              status_label = "CRITICAL — High severity issues found"
+          elif counts["Medium"] > 0:
+              status_icon  = "🟠"
+              status_label = "WARNING — Medium severity issues found"
+          elif counts["Low"] > 0:
+              status_icon  = "🟡"
+              status_label = "LOW — Minor issues found"
+          else:
+              status_icon  = "✅"
+              status_label = "PASSED — No significant issues found"
+
+          target = ""
+          if report.get("site"):
+              target = report["site"][0].get("@name", "")
+
+          # ── Build markdown ────────────────────────────────────────────────
+          lines = []
+          lines.append(f"# {status_icon} DAST Scan Results — {status_label}")
+          lines.append("")
+          lines.append(f"**Target:** `{target}`")
+          lines.append("")
+
+          # Summary table
+          lines.append("## Alert Summary")
+          lines.append("")
+          lines.append("| Severity | Count |")
+          lines.append("|---|---|")
+          lines.append(f"| 🔴 High          | **{counts['High']}** |")
+          lines.append(f"| 🟠 Medium        | **{counts['Medium']}** |")
+          lines.append(f"| 🟡 Low           | **{counts['Low']}** |")
+          lines.append(f"| 🔵 Informational | **{counts['Informational']}** |")
+          lines.append(f"| **Total**        | **{sum(counts.values())}** |")
+          lines.append("")
+
+          # Alert detail table — only High + Medium shown inline
+          important = [r for r in alert_rows if r[0] in ("High", "Medium")]
+          if important:
+              lines.append("## High & Medium Severity Alerts")
+              lines.append("")
+              lines.append("| Severity | Alert Name | Instances | Recommended Fix |")
+              lines.append("|---|---|---|---|")
+              for _, badge, name, count, solution in important:
+                  # clean solution text for table cell
+                  sol_clean = solution.replace("|", "/").replace("\n", " ")
+                  lines.append(f"| {badge} | {name} | {count} | {sol_clean}... |")
+              lines.append("")
+
+          # Low alerts — just names
+          low_alerts = [r for r in alert_rows if r[0] == "Low"]
+          if low_alerts:
+              lines.append("## Low Severity Alerts")
+              lines.append("")
+              lines.append("| Alert Name | Instances |")
+              lines.append("|---|---|")
+              for _, badge, name, count, _ in low_alerts:
+                  lines.append(f"| {name} | {count} |")
+              lines.append("")
+
+          lines.append("> 📥 Full reports (HTML, JSON, MD) available in the **Artifacts** section below.")
+
+          # ── Also print to Actions log ─────────────────────────────────────
+          summary_text = "\n".join(lines)
+          print(summary_text)
+
+          # ── Write to GitHub Step Summary ──────────────────────────────────
+          if summary_file:
+              with open(summary_file, "w") as f:
+                  f.write(summary_text)
+              print("\n✅ Summary written to GitHub Actions Summary page")
+          else:
+              print("\n⚠️  GITHUB_STEP_SUMMARY not set (running locally?)")
+
+          # ── Fail pipeline if High vulnerabilities found ───────────────────
+          # Comment out the next 2 lines if you don't want pipeline to fail on High findings
+          if counts["High"] > 0:
+              sys.exit(1)
+
+          EOF
 
       - name: Upload ZAP Scan Reports
         if: always()
