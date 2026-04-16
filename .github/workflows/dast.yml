@@ -1,0 +1,56 @@
+name: DAST Security Scan
+
+on:
+  workflow_dispatch:          # Manual trigger
+  push:
+    branches: [ main ]        # Auto trigger on push to main
+  pull_request:
+    branches: [ main ]        # Auto trigger on PR to main
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dast-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+
+      # ── 1. Checkout repository ────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Fix permissions so ZAP Docker container can write reports ───────
+      - name: Fix ZAP folder permissions
+        run: chmod -R 777 .github/workflows/zap/
+
+      # ── 3. Run ZAP Automation Framework Scan ──────────────────────────────
+      - name: OWASP ZAP Authenticated DAST Scan
+        uses: zaproxy/action-af@v0.2.0
+        with:
+          plan: '.github/workflows/zap/plan.yml'
+          fail_action: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 4. Debug: List generated files ────────────────────────────────────
+      - name: List generated reports
+        if: always()
+        run: |
+          echo "====== ZAP folder contents ======"
+          ls -la .github/workflows/zap/
+          echo "====== Workspace root ======"
+          ls -la
+
+      # ── 5. Upload reports as GitHub artifacts ─────────────────────────────
+      - name: Upload ZAP Scan Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-dast-reports
+          path: |
+            .github/workflows/zap/report_html.html
+            .github/workflows/zap/report_json.json
+            .github/workflows/zap/report_md.md
+          retention-days: 30
