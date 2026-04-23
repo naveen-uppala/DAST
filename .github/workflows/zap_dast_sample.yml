@@ -1,0 +1,44 @@
+name: DAST Security Scan
+
+on:
+  workflow_dispatch:
+  
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dast-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Fix permissions for ZAP
+        run: |
+          chmod -R 777 .
+
+      - name: OWASP ZAP Automation Scan
+        uses: zaproxy/action-af@v0.2.0
+        continue-on-error: false
+        with:
+          plan: '.github/workflows/zap/plan.yml'
+
+
+      - name: List files after ZAP scan
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Files:"
+          ls -la
+          
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap_scan_report
+          path: |
+            report_html.html
+            report_json.json
+            report_md.md
